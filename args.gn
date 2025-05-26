@@ -1,0 +1,13 @@
+target_os="${OS}"
+target_cpu="${ARCH}"
+v8_target_cpu="${ARCH}"
+is_debug=${IS_DEBUG}
+symbol_level=${SYMBOL_LEVEL}
+is_clang=${IS_CLANG}
+#use_custom_libcxx=false
+clang_use_chrome_plugins=false
+treat_warnings_as_errors=false
+is_component_build=${SHARED_LIB}
+v8_static_library=${STATIC_LIB}
+v8_monolithic=${STATIC_LIB}
+v8_use_external_startup_data=false
