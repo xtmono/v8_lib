@@ -1,0 +1,479 @@
+name: build when push
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - '**'
+    tags-ignore:
+      - '*'
+
+env:
+  V8_VERSION: 9.6.180.37
+  TARGETS_SHARED: v8
+  TARGETS_STATIC: v8_monolith
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build-linux-x64:
+    # if: ${{ false }}  # disable
+    name: linux-x64
+    runs-on: ubuntu-latest
+    container:
+      image: debian:buster
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [
+          linux-x64-static-release,
+          linux-x64-static-debug,
+          linux-x64-shared-release,
+          linux-x64-shared-debug
+        ]
+    env:
+      PLATFORM: ${{ matrix.platform }}
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Platform env
+        run: |
+          uname -a
+          OS=$(echo ${PLATFORM} | awk -F'[-_.]' '{print $1}'); echo "OS=${OS}" >> $GITHUB_ENV
+          ARCH=$(echo ${PLATFORM} | awk -F'[-_.]' '{print $2}'); echo "ARCH=${ARCH}" >> $GITHUB_ENV
+          LIB_TYPE=$(echo ${PLATFORM} | awk -F'[-_.]' '{print $3}'); echo "LIB_TYPE=${LIB_TYPE}" >> $GITHUB_ENV
+          BUILD_TYPE=$(echo ${PLATFORM} | awk -F'[-_.]' '{print $4}'); echo "BUILD_TYPE=${BUILD_TYPE}" >> $GITHUB_ENV
+          [ "${LIB_TYPE}" = "shared" ] && \
+            { BUILD_TARGETS=${TARGETS_SHARED}; echo "BUILD_TARGETS=${BUILD_TARGETS}" >> $GITHUB_ENV; } || \
+            { BUILD_TARGETS=${TARGETS_STATIC}; echo "BUILD_TARGETS=${BUILD_TARGETS}" >> $GITHUB_ENV; }
+      - name: Install preliminary tools
+        run: |
+          apt-get update
+          apt-get install -y git curl python3 pigz pkg-config build-essential ninja-build
+          ln -s /usr/bin/python3 /usr/bin/python
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install depot_tools
+        run: |
+          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
+          PATH=${GITHUB_WORKSPACE}/depot_tools:${PATH}; echo "PATH=${PATH}" >> $GITHUB_ENV
+      - name: Patch depot_tools for python3.7 (in system)
+        run: |
+          sed -i 's/@functools\.lru_cache\b/@functools.lru_cache(maxsize=128)/g' depot_tools/gclient_paths.py
+      - name: Fetch v8 repository
+        run: |
+          gclient
+          fetch v8
+      - name: Sync v8 repository to target version
+        run: |
+          cd v8
+          git checkout tags/${V8_VERSION}
+          gclient sync -D
+      - name: Compress headers, sources
+        if: ${{ env.LIB_TYPE == 'static' && env.BUILD_TYPE == 'release' }}
+        run: |
+          tar --use-compress-program=pigz -cf v8-${V8_VERSION}-include.tar.gz v8/include
+          tar --use-compress-program=pigz -cf v8-${V8_VERSION}-src.tar.gz v8/src
+      - name: Upload headers
+        if: ${{ env.LIB_TYPE == 'static' && env.BUILD_TYPE == 'release' }}
+        uses: actions/upload-artifact@v4
+        with:
+          path: v8-${{ env.V8_VERSION }}-include.tar.gz
+          name: v8-${{ env.V8_VERSION }}-include.tar.gz
+      - name: Upload sources
+        if: ${{ env.LIB_TYPE == 'static' && env.BUILD_TYPE == 'release' }}
+        uses: actions/upload-artifact@v4
+        with:
+          path: v8-${{ env.V8_VERSION }}-src.tar.gz
+          name: v8-${{ env.V8_VERSION }}-src.tar.gz
+      - name: Set build args
+        run: |
+          cd v8
+          mkdir -p out.gn/${PLATFORM}
+          [ "$BUILD_TYPE" = "debug" ] && \
+            export IS_DEBUG=true SYMBOL_LEVEL=2 || \
+            export IS_DEBUG=false SYMBOL_LEVEL=1
+          [ "${LIB_TYPE}" = "shared" ] && \
+            export SHARED_LIB=true STATIC_LIB=false || \
+            export SHARED_LIB=false STATIC_LIB=true
+          perl -pe 's{\$(\{)?(\w+)(?(1)\})}{$ENV{$2} // $&}ge' \
+            "${GITHUB_WORKSPACE}/args.gn" > "out.gn/${PLATFORM}/args.gn"
+          [ "$BUILD_TYPE" = "release" ] && \
+            echo "v8_enable_gdbjit=false" >> out.gn/${PLATFORM}/args.gn
+          cat out.gn/${PLATFORM}/args.gn
+      - name: Build library
+        # continue-on-error: true
+        run: |
+          cd v8
+          gn gen out.gn/${PLATFORM}
+          gn args --list out.gn/${PLATFORM} > out.gn/${PLATFORM}/v8_build_args.txt
+          ninja -j $(($(nproc)+2)) ${BUILD_TARGETS} -C out.gn/${PLATFORM}
+      - name: Compress library
+        run: |
+          mkdir -p v8.pkg
+          mv v8/out.gn v8.pkg/
+          rm -rf v8 depot_tools && mv v8.pkg v8
+          tar --use-compress-program=pigz -cf v8-${V8_VERSION}-lib-${PLATFORM}.tar.gz v8
+      - name: Upload library
+        uses: actions/upload-artifact@v4
+        with:
+          path: v8-${{ env.V8_VERSION }}-lib-${{ matrix.platform }}.tar.gz
+          name: v8-${{ env.V8_VERSION }}-lib-${{ matrix.platform }}.tar.gz
+
+  build-linux-arm64:
+    # if: ${{ false }}  # disable
+    name: linux-arm64
+    runs-on: ubuntu-22.04-arm
+    container:
+      image: debian:buster
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [
+          linux-arm64-static-release,
+          linux-arm64-static-debug,
+          linux-arm64-shared-release,
+          linux-arm64-shared-debug
+        ]
+    env:
+      PLATFORM: ${{ matrix.platform }}
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Platform env
+        run: |
+          uname -a
+          OS=$(echo ${PLATFORM} | awk -F'[-_.]' '{print $1}'); echo "OS=${OS}" >> $GITHUB_ENV
+          ARCH=$(echo ${PLATFORM} | awk -F'[-_.]' '{print $2}'); echo "ARCH=${ARCH}" >> $GITHUB_ENV
+          LIB_TYPE=$(echo ${PLATFORM} | awk -F'[-_.]' '{print $3}'); echo "LIB_TYPE=${LIB_TYPE}" >> $GITHUB_ENV
+          BUILD_TYPE=$(echo ${PLATFORM} | awk -F'[-_.]' '{print $4}'); echo "BUILD_TYPE=${BUILD_TYPE}" >> $GITHUB_ENV
+          [ "${LIB_TYPE}" = "shared" ] && \
+            { BUILD_TARGETS=${TARGETS_SHARED}; echo "BUILD_TARGETS=${BUILD_TARGETS}" >> $GITHUB_ENV; } || \
+            { BUILD_TARGETS=${TARGETS_STATIC}; echo "BUILD_TARGETS=${BUILD_TARGETS}" >> $GITHUB_ENV; }
+      - name: Install preliminary tools
+        run: |
+          apt-get update
+          apt-get install -y git curl python3 pigz pkg-config build-essential ninja-build
+          ln -s /usr/bin/python3 /usr/bin/python
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install depot_tools
+        run: |
+          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
+          PATH=${GITHUB_WORKSPACE}/depot_tools:${PATH}; echo "PATH=${PATH}" >> $GITHUB_ENV
+      - name: Patch depot_tools for python3.7 (in system)
+        run: |
+          sed -i 's/@functools\.lru_cache\b/@functools.lru_cache(maxsize=128)/g' depot_tools/gclient_paths.py
+      - name: Fetch v8 repository
+        run: |
+          gclient
+          fetch v8
+      - name: Sync v8 repository to target version
+        run: |
+          cd v8
+          git checkout tags/${V8_VERSION}
+          gclient sync -D
+      - name: Install gn for linux-arm64
+        run: |
+          cd v8
+          mv buildtools/linux64/gn buildtools/linux64/gn-linux-x64
+          curl -L https://chrome-infra-packages.appspot.com/dl/gn/gn/linux-arm64/+/latest -o gn-linux-arm64.zip
+          apt-get install -y unzip
+          unzip gn-linux-arm64.zip -d buildtools/linux64 && rm gn-linux-arm64.zip
+          sed -i 's/visibility = \[ ":.*" \]\([[:space:]]*#.*\)\?/visibility = [ ":*", "\/\/testing\/gmock:*" ]\1/' third_party/googletest/BUILD.gn
+      - name: Set build args
+        run: |
+          cd v8
+          mkdir -p out.gn/${PLATFORM}
+          [ "$BUILD_TYPE" = "debug" ] && \
+            export IS_DEBUG=true SYMBOL_LEVEL=2 || \
+            export IS_DEBUG=false SYMBOL_LEVEL=1
+          [ "${LIB_TYPE}" = "shared" ] && \
+            export SHARED_LIB=true STATIC_LIB=false || \
+            export SHARED_LIB=false STATIC_LIB=true
+          perl -pe 's{\$(\{)?(\w+)(?(1)\})}{$ENV{$2} // $&}ge' \
+            "${GITHUB_WORKSPACE}/args.gn" > "out.gn/${PLATFORM}/args.gn"
+          [ "$BUILD_TYPE" = "release" ] && \
+            echo "v8_enable_gdbjit=false" >> out.gn/${PLATFORM}/args.gn
+          cat out.gn/${PLATFORM}/args.gn
+      - name: Build library
+        # continue-on-error: true
+        run: |
+          cd v8
+          gn gen out.gn/${PLATFORM}
+          gn args --list out.gn/${PLATFORM} > out.gn/${PLATFORM}/v8_build_args.txt
+          ninja -j $(($(nproc)+2)) ${BUILD_TARGETS} -C out.gn/${PLATFORM}
+      - name: Compress library
+        run: |
+          mkdir -p v8.pkg
+          mv v8/out.gn v8.pkg/
+          rm -rf v8 depot_tools && mv v8.pkg v8
+          tar --use-compress-program=pigz -cf v8-${V8_VERSION}-lib-${PLATFORM}.tar.gz v8
+      - name: Upload library
+        uses: actions/upload-artifact@v4
+        with:
+          path: v8-${{ env.V8_VERSION }}-lib-${{ matrix.platform }}.tar.gz
+          name: v8-${{ env.V8_VERSION }}-lib-${{ matrix.platform }}.tar.gz
+
+  build-mac-x64:
+    # if: ${{ false }}  # disable
+    name: mac-x64
+    runs-on: macos-13
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [
+          mac-x64-static-release,
+          mac-x64-static-debug,
+          mac-x64-shared-release,
+          mac-x64-shared-debug
+        ]
+    env:
+      PLATFORM: ${{ matrix.platform }}
+    steps:
+      - name: Platform env
+        run: |
+          uname -a
+          OS=$(echo ${PLATFORM} | awk -F'[-_.]' '{print $1}'); echo "OS=${OS}" >> $GITHUB_ENV
+          ARCH=$(echo ${PLATFORM} | awk -F'[-_.]' '{print $2}'); echo "ARCH=${ARCH}" >> $GITHUB_ENV
+          LIB_TYPE=$(echo ${PLATFORM} | awk -F'[-_.]' '{print $3}'); echo "LIB_TYPE=${LIB_TYPE}" >> $GITHUB_ENV
+          BUILD_TYPE=$(echo ${PLATFORM} | awk -F'[-_.]' '{print $4}'); echo "BUILD_TYPE=${BUILD_TYPE}" >> $GITHUB_ENV
+          [ "${LIB_TYPE}" = "shared" ] && \
+            { BUILD_TARGETS=${TARGETS_SHARED}; echo "BUILD_TARGETS=${BUILD_TARGETS}" >> $GITHUB_ENV; } || \
+            { BUILD_TARGETS=${TARGETS_STATIC}; echo "BUILD_TARGETS=${BUILD_TARGETS}" >> $GITHUB_ENV; }
+      - name: Install preliminary tools
+        run: |
+          brew update
+          brew install pigz
+      - name: Setup Python3.9
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install depot_tools
+        run: |
+          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
+          PATH=${GITHUB_WORKSPACE}/depot_tools:${PATH}; echo "PATH=${PATH}" >> $GITHUB_ENV
+      - name: Fetch v8 repository
+        run: |
+          gclient
+          fetch v8
+      - name: Sync v8 repository to target version
+        run: |
+          cd v8
+          git checkout tags/${V8_VERSION}
+          gclient sync -D
+      # - name: Patch v8 for python3.13 (in depot_tools)
+      #   run: |
+      #     sed -i '' 's/from collections import Mapping/from collections.abc import Mapping/' v8/third_party/jinja2/tests.py
+      - name: Set build args
+        run: |
+          cd v8
+          mkdir -p out.gn/${PLATFORM}
+          [ "$BUILD_TYPE" = "debug" ] && \
+            export IS_DEBUG=true SYMBOL_LEVEL=2 || \
+            export IS_DEBUG=false SYMBOL_LEVEL=1
+          [ "${LIB_TYPE}" = "shared" ] && \
+            export SHARED_LIB=true STATIC_LIB=false || \
+            export SHARED_LIB=false STATIC_LIB=true
+          perl -pe 's{\$(\{)?(\w+)(?(1)\})}{$ENV{$2} // $&}ge' \
+            "${GITHUB_WORKSPACE}/args.gn" > "out.gn/${PLATFORM}/args.gn"
+          [ "$BUILD_TYPE" = "release" ] && \
+            echo "v8_enable_gdbjit=false" >> out.gn/${PLATFORM}/args.gn
+          cat out.gn/${PLATFORM}/args.gn
+      - name: Build library
+        # continue-on-error: true
+        run: |
+          cd v8
+          gn gen out.gn/${PLATFORM}
+          gn args --list out.gn/${PLATFORM} > out.gn/${PLATFORM}/v8_build_args.txt
+          ninja -j $(($(sysctl -n hw.ncpu)+2)) ${BUILD_TARGETS} -C out.gn/${PLATFORM}
+      - name: Compress library
+        run: |
+          mkdir -p v8.pkg
+          mv v8/out.gn v8.pkg/
+          rm -rf v8 depot_tools && mv v8.pkg v8
+          gtar --use-compress-program=pigz -cf v8-${V8_VERSION}-lib-${PLATFORM}.tar.gz v8
+      - name: Upload library
+        uses: actions/upload-artifact@v4
+        with:
+          path: v8-${{ env.V8_VERSION }}-lib-${{ matrix.platform }}.tar.gz
+          name: v8-${{ env.V8_VERSION }}-lib-${{ matrix.platform }}.tar.gz
+
+  build-mac-arm64:
+    # if: ${{ false }}  # disable
+    name: mac-arm64
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [
+          mac-arm64-static-release,
+          mac-arm64-static-debug,
+          mac-arm64-shared-release,
+          mac-arm64-shared-debug
+        ]
+    env:
+      PLATFORM: ${{ matrix.platform }}
+    steps:
+      - name: Platform env
+        run: |
+          uname -a
+          OS=$(echo ${PLATFORM} | awk -F'[-_.]' '{print $1}'); echo "OS=${OS}" >> $GITHUB_ENV
+          ARCH=$(echo ${PLATFORM} | awk -F'[-_.]' '{print $2}'); echo "ARCH=${ARCH}" >> $GITHUB_ENV
+          LIB_TYPE=$(echo ${PLATFORM} | awk -F'[-_.]' '{print $3}'); echo "LIB_TYPE=${LIB_TYPE}" >> $GITHUB_ENV
+          BUILD_TYPE=$(echo ${PLATFORM} | awk -F'[-_.]' '{print $4}'); echo "BUILD_TYPE=${BUILD_TYPE}" >> $GITHUB_ENV
+          [ "${LIB_TYPE}" = "shared" ] && \
+            { BUILD_TARGETS=${TARGETS_SHARED}; echo "BUILD_TARGETS=${BUILD_TARGETS}" >> $GITHUB_ENV; } || \
+            { BUILD_TARGETS=${TARGETS_STATIC}; echo "BUILD_TARGETS=${BUILD_TARGETS}" >> $GITHUB_ENV; }
+      - name: Install preliminary tools
+        run: |
+          brew update
+          brew install pigz
+      - name: Setup Python3.9
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install depot_tools
+        run: |
+          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
+          PATH=${GITHUB_WORKSPACE}/depot_tools:${PATH}; echo "PATH=${PATH}" >> $GITHUB_ENV
+      - name: Fetch v8 repository
+        run: |
+          gclient
+          fetch v8
+      - name: Sync v8 repository to target version
+        run: |
+          cd v8
+          git checkout tags/${V8_VERSION}
+          gclient sync -D
+      # - name: Patch v8 for python3.13 (in depot_tools)
+      #   run: |
+      #     sed -i '' 's/from collections import Mapping/from collections.abc import Mapping/' v8/third_party/jinja2/tests.py
+      - name: Set build args
+        run: |
+          cd v8
+          mkdir -p out.gn/${PLATFORM}
+          [ "$BUILD_TYPE" = "debug" ] && \
+            export IS_DEBUG=true SYMBOL_LEVEL=2 || \
+            export IS_DEBUG=false SYMBOL_LEVEL=1
+          [ "${LIB_TYPE}" = "shared" ] && \
+            export SHARED_LIB=true STATIC_LIB=false || \
+            export SHARED_LIB=false STATIC_LIB=true
+          perl -pe 's{\$(\{)?(\w+)(?(1)\})}{$ENV{$2} // $&}ge' \
+            "${GITHUB_WORKSPACE}/args.gn" > "out.gn/${PLATFORM}/args.gn"
+          [ "$BUILD_TYPE" = "release" ] && \
+            echo "v8_enable_gdbjit=false" >> out.gn/${PLATFORM}/args.gn
+          cat out.gn/${PLATFORM}/args.gn
+      - name: Build library
+        # continue-on-error: true
+        run: |
+          cd v8
+          gn gen out.gn/${PLATFORM}
+          gn args --list out.gn/${PLATFORM} > out.gn/${PLATFORM}/v8_build_args.txt
+          ninja -j $(($(sysctl -n hw.ncpu)+2)) ${BUILD_TARGETS} -C out.gn/${PLATFORM}
+      - name: Compress library
+        run: |
+          mkdir -p v8.pkg
+          mv v8/out.gn v8.pkg/
+          rm -rf v8 depot_tools && mv v8.pkg v8
+          gtar --use-compress-program=pigz -cf v8-${V8_VERSION}-lib-${PLATFORM}.tar.gz v8
+      - name: Upload library
+        uses: actions/upload-artifact@v4
+        with:
+          path: v8-${{ env.V8_VERSION }}-lib-${{ matrix.platform }}.tar.gz
+          name: v8-${{ env.V8_VERSION }}-lib-${{ matrix.platform }}.tar.gz
+
+  build-win-x64:
+    # if: ${{ false }}  # disable
+    name: win-x64
+    runs-on: windows-2019
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [
+          win-x64-static-release,
+          win-x64-static-debug,
+          win-x64-shared-release,
+          win-x64-shared-debug
+        ]
+    env:
+      PLATFORM: ${{ matrix.platform }}
+      DEPOT_TOOLS_WIN_TOOLCHAIN: 0
+    steps:
+      - name: Platform env
+        run: |
+          uname -a
+          OS=$(echo ${PLATFORM} | awk -F'[-_.]' '{print $1}'); echo "OS=${OS}" >> $GITHUB_ENV
+          ARCH=$(echo ${PLATFORM} | awk -F'[-_.]' '{print $2}'); echo "ARCH=${ARCH}" >> $GITHUB_ENV
+          LIB_TYPE=$(echo ${PLATFORM} | awk -F'[-_.]' '{print $3}'); echo "LIB_TYPE=${LIB_TYPE}" >> $GITHUB_ENV
+          BUILD_TYPE=$(echo ${PLATFORM} | awk -F'[-_.]' '{print $4}'); echo "BUILD_TYPE=${BUILD_TYPE}" >> $GITHUB_ENV
+          [ "${LIB_TYPE}" = "shared" ] && \
+            { BUILD_TARGETS=${TARGETS_SHARED}; echo "BUILD_TARGETS=${BUILD_TARGETS}" >> $GITHUB_ENV; } || \
+            { BUILD_TARGETS=${TARGETS_STATIC}; echo "BUILD_TARGETS=${BUILD_TARGETS}" >> $GITHUB_ENV; }
+      - name: Setup VisualStudio 2019
+        uses: microsoft/setup-msbuild@v2
+      # - name: Install Visual Studio 2019
+      #   run: |
+      #     choco install -y visualstudio2019buildtools --package-parameters \
+      #       "--add Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
+      - name: Setup Python3.9
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install depot_tools
+        run: |
+          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
+          PATH=${GITHUB_WORKSPACE}/depot_tools:${PATH}; echo "PATH=${PATH}" >> $GITHUB_ENV
+      - name: Fetch v8 repository
+        run: |
+          gclient
+          fetch v8
+      - name: Sync v8 repository to target version
+        run: |
+          cd v8
+          git checkout tags/${V8_VERSION}
+          gclient sync -D
+      - name: Patch v8 for python3.13 (in depot_tools)
+        run: |
+          sed -i 's/from collections import Mapping/from collections.abc import Mapping/' v8/third_party/jinja2/tests.py
+      - name: Set build args
+        run: |
+          cd v8
+          mkdir -p out.gn/${PLATFORM}
+          [ "$BUILD_TYPE" = "debug" ] && \
+            export IS_DEBUG=true SYMBOL_LEVEL=2 || \
+            export IS_DEBUG=false SYMBOL_LEVEL=1
+          [ "${LIB_TYPE}" = "shared" ] && \
+            export SHARED_LIB=true STATIC_LIB=false || \
+            export SHARED_LIB=false STATIC_LIB=true
+          perl -pe 's{\$(\{)?(\w+)(?(1)\})}{$ENV{$2} // $&}ge' \
+            "${GITHUB_WORKSPACE}/args.gn" > "out.gn/${PLATFORM}/args.gn"
+          [ "$BUILD_TYPE" = "release" ] && \
+            echo "v8_enable_gdbjit=false" >> out.gn/${PLATFORM}/args.gn
+          echo 'target_winuwp_family="desktop"' >> out.gn/${PLATFORM}/args.gn
+          # Patch args.gn to change compiler to clang due to MSVC bug
+          sed -i 's/is_clang=false/is_clang=true/g' out.gn/${PLATFORM}/args.gn
+          cat out.gn/${PLATFORM}/args.gn
+      - name: Build library
+        # continue-on-error: true
+        run: |
+          cd v8
+          gn gen out.gn/${PLATFORM}
+          gn args --list out.gn/${PLATFORM} > out.gn/${PLATFORM}/v8_build_args.txt
+          ninja -j $((${NUMBER_OF_PROCESSORS}+2)) ${BUILD_TARGETS} -C out.gn/${PLATFORM}
+      - name: Compress library
+        run: |
+          mkdir -p v8.pkg
+          mv v8/out.gn v8.pkg/
+          rm -rf v8 depot_tools && mv v8.pkg v8
+          tar -czf v8-${V8_VERSION}-lib-${PLATFORM}.tar.gz v8
+      - name: Upload library
+        uses: actions/upload-artifact@v4
+        with:
+          path: v8-${{ env.V8_VERSION }}-lib-${{ matrix.platform }}.tar.gz
+          name: v8-${{ env.V8_VERSION }}-lib-${{ matrix.platform }}.tar.gz

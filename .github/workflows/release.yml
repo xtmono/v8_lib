@@ -1,0 +1,153 @@
+name: release when publish
+on:
+  workflow_dispatch:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: write
+  actions: read
+
+env:
+  V8_VERSION: 9.6.180.37
+  TARGETS_SHARED: v8 v8_base v8_libbase v8_libplatform icui18n icuuc chrome_zlib zlib
+  TARGETS_STATIC: v8_monolith
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [
+          linux-x64-static-release,
+          linux-x64-static-debug,
+          linux-x64-shared-release,
+          linux-x64-shared-debug,
+          linux-arm64-static-release,
+          linux-arm64-static-debug,
+          linux-arm64-shared-release,
+          linux-arm64-shared-debug,
+          mac-x64-static-release,
+          mac-x64-static-debug,
+          mac-x64-shared-release,
+          mac-x64-shared-debug,
+          mac-arm64-static-release,
+          mac-arm64-static-debug,
+          mac-arm64-shared-release,
+          mac-arm64-shared-debug,
+          win-x64-static-release,
+          win-x64-static-debug,
+          win-x64-shared-release,
+          win-x64-shared-debug
+        ]
+    env:
+      PLATFORM: ${{ matrix.platform }}
+    steps:
+      - name: Platform env
+        run: |
+          OS=$(echo ${PLATFORM} | awk -F'[-_.]' '{print $1}'); echo "OS=${OS}" >> $GITHUB_ENV
+          ARCH=$(echo ${PLATFORM} | awk -F'[-_.]' '{print $2}'); echo "ARCH=${ARCH}" >> $GITHUB_ENV
+          LIB_TYPE=$(echo ${PLATFORM} | awk -F'[-_.]' '{print $3}'); echo "LIB_TYPE=${LIB_TYPE}" >> $GITHUB_ENV
+          BUILD_TYPE=$(echo ${PLATFORM} | awk -F'[-_.]' '{print $4}'); echo "BUILD_TYPE=${BUILD_TYPE}" >> $GITHUB_ENV
+          [ "${LIB_TYPE}" = "shared" ] && \
+            { BUILD_TARGETS=${TARGETS_SHARED}; echo "BUILD_TARGETS=${BUILD_TARGETS}" >> $GITHUB_ENV; } || \
+            { BUILD_TARGETS=${TARGETS_STATIC}; echo "BUILD_TARGETS=${BUILD_TARGETS}" >> $GITHUB_ENV; }
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Find build workflow run for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RUN_ID=$(gh api -X GET \
+            "repos/${{ github.repository }}/actions/workflows/push.yml/runs?per_page=100" \
+            --jq ".workflow_runs[] | select(.head_sha==\"${GITHUB_SHA}\") | .id" | head -n1)
+          if [ -z "$RUN_ID" ]; then
+            echo "No workflow run found for commit ${GITHUB_SHA}"
+            exit 1
+          fi
+          echo "RUN_ID=${RUN_ID}" >> $GITHUB_ENV
+      - name: Download headers from build workflow run
+        if: ${{ matrix.platform == 'linux-x64-static-release' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ARTIFACT_ID=$(gh api -X GET \
+            "repos/${{ github.repository }}/actions/runs/${RUN_ID}/artifacts" \
+            --jq ".artifacts[] | select(.name==\"v8-${V8_VERSION}-include.tar.gz\") | .id")
+          gh api -X GET \
+            -H "Accept: application/vnd.github+json" \
+            "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" > artifact.zip
+          unzip artifact.zip && rm artifact.zip
+      - name: Compress headers
+        if: ${{ matrix.platform == 'linux-x64-static-release' }}
+        run: |
+          tar --use-compress-program=pigz -xf v8-${V8_VERSION}-include.tar.gz && \
+          rm v8-${V8_VERSION}-include.tar.gz
+          tar --use-compress-program=pigz -cf v8-${V8_VERSION}-include.tar.gz -C v8/include .
+      - name: Download sources from build workflow run
+        if: ${{ matrix.platform == 'linux-x64-static-release' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ARTIFACT_ID=$(gh api -X GET \
+            "repos/${{ github.repository }}/actions/runs/${RUN_ID}/artifacts" \
+            --jq ".artifacts[] | select(.name==\"v8-${V8_VERSION}-src.tar.gz\") | .id")
+          gh api -X GET \
+            -H "Accept: application/vnd.github+json" \
+            "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" > artifact.zip
+          unzip artifact.zip && rm artifact.zip
+      - name: Compress sources
+        if: ${{ matrix.platform == 'linux-x64-static-release' }}
+        run: |
+          tar --use-compress-program=pigz -xf v8-${V8_VERSION}-src.tar.gz && \
+          rm v8-${V8_VERSION}-src.tar.gz
+          tar --use-compress-program=pigz -cf v8-${V8_VERSION}-src.tar.gz -C v8/src .
+      - name: Upload headers and sources
+        if: ${{ matrix.platform == 'linux-x64-static-release' }}
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          files: |
+            v8-${{ env.V8_VERSION }}-include.tar.gz
+            v8-${{ env.V8_VERSION }}-src.tar.gz
+      - name: Download libraries from build workflow run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ARTIFACT_ID=$(gh api -X GET \
+            "repos/${{ github.repository }}/actions/runs/${RUN_ID}/artifacts" \
+            --jq ".artifacts[] | select(.name==\"v8-${V8_VERSION}-lib-${PLATFORM}.tar.gz\") | .id")
+          gh api -X GET \
+            -H "Accept: application/vnd.github+json" \
+            "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" > artifact.zip
+          unzip artifact.zip && rm artifact.zip
+      - name: Compress libraries
+        run: |
+          tar --use-compress-program=pigz -xf v8-${V8_VERSION}-lib-${PLATFORM}.tar.gz && \
+          rm v8-${V8_VERSION}-lib-${PLATFORM}.tar.gz
+          mkdir lib
+          mv v8/out.gn/${PLATFORM}/{args.gn,v8_build_*} lib/
+          for target in ${BUILD_TARGETS}; do
+            find v8/out.gn/${PLATFORM} \
+              \( -name "lib${target}.so" \
+              -o -name "lib${target}.dylib" -o -name "lib${target}.dylib.dSYM" \
+              -o -name "lib${target}.a" \
+              -o -name "${target}.dll" -o -name "${target}.dll.lib" -o -name "${target}.dll.pdb" \
+              -o -name "${target}.lib" \) \
+              -exec mv -v {} lib/ \; 2>/dev/null || true
+          done
+          rm -rf v8
+          tar --use-compress-program=pigz -cf v8-${V8_VERSION}-lib-${PLATFORM}.tar.gz -C lib .
+      - name: Upload libraries
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          files: v8-${{ env.V8_VERSION }}-lib-${{ matrix.platform }}.tar.gz

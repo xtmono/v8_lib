@@ -1,0 +1,34 @@
+# Platform features
+target_os="${OS}"
+target_cpu="${ARCH}"
+v8_target_cpu="${ARCH}"
+
+# Build features
+is_clang=false
+clang_use_chrome_plugins=false
+use_custom_libcxx=false
+is_debug=${IS_DEBUG}
+symbol_level=${SYMBOL_LEVEL}
+enable_dsyms=true
+enable_wmax_tokens=false
+treat_warnings_as_errors=false
+v8_imminent_deprecation_warnings=false
+is_component_build=${SHARED_LIB}
+v8_static_library=${STATIC_LIB}
+v8_monolithic=${STATIC_LIB}
+v8_use_external_startup_data=false
+
+# Memory features
+v8_enable_pointer_compression=false
+v8_enable_heap_sandbox=false
+
+# Disable Chromium specific features
+toolkit_views=false
+use_aura=false
+use_dbus=false
+use_gio=false
+use_glib=false
+use_ozone=false
+use_udev=false
+
+# Additional features
