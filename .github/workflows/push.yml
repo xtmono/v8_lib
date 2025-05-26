@@ -1,0 +1,205 @@
+name: build when push
+on: [push]
+
+env:
+  V8_VERSION: 9.4.146.26
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build-linux-x64:
+    # if: ${{ false }}  # disable
+    name: linux-x64
+    runs-on: ubuntu-latest
+    container:
+      image: debian:buster
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [
+          linux-x64-static-release,
+          linux-x64-static-debug,
+          linux-x64-shared-release,
+          linux-x64-shared-debug
+        ]
+    env:
+      PLATFORM: ${{ matrix.platform }}
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Platform env
+        run: |
+          uname -a
+          echo "OS=$(echo ${PLATFORM} | awk -F'[-_.]' '{print $1}')" >> $GITHUB_ENV
+          echo "ARCH=$(echo ${PLATFORM} | awk -F'[-_.]' '{print $2}')" >> $GITHUB_ENV
+          echo "LIB_TYPE=$(echo ${PLATFORM} | awk -F'[-_.]' '{print $3}')" >> $GITHUB_ENV
+          echo "BUILD_TYPE=$(echo ${PLATFORM} | awk -F'[-_.]' '{print $4}')" >> $GITHUB_ENV
+      - name: Install preliminary tools
+        run: |
+          apt-get update
+          apt-get install -y git curl python3 pigz pkg-config build-essential ninja-build
+          ln -s /usr/bin/python3 /usr/bin/python
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install depot_tools
+        run: |
+          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
+          echo "PATH=${GITHUB_WORKSPACE}/depot_tools:${PATH}" >> $GITHUB_ENV
+      - name: Patch depot_tools for python3.7 (in system)
+        run: |
+          sed -i 's/@functools\.lru_cache\b/@functools.lru_cache(maxsize=128)/g' depot_tools/gclient_paths.py
+      - name: Fetch v8 repository
+        run: |
+          gclient
+          fetch v8
+      - name: Sync v8 repository to target version
+        run: |
+          cd v8
+          git checkout tags/${V8_VERSION}
+          gclient sync -D
+      - name: Compress headers, sources
+        if: env.LIB_TYPE == 'static' && env.BUILD_TYPE == 'release'
+        run: |
+          tar --use-compress-program=pigz -cf v8-${V8_VERSION}-include.tar.gz v8/include
+          tar --use-compress-program=pigz -cf v8-${V8_VERSION}-src.tar.gz v8/src
+      - name: Upload headers
+        if: env.LIB_TYPE == 'static' && env.BUILD_TYPE == 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          path: v8-${{ env.V8_VERSION }}-include.tar.gz
+          name: v8-${{ env.V8_VERSION }}-include.tar.gz
+      - name: Upload sources
+        if: env.LIB_TYPE == 'static' && env.BUILD_TYPE == 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          path: v8-${{ env.V8_VERSION }}-src.tar.gz
+          name: v8-${{ env.V8_VERSION }}-src.tar.gz
+      - name: Set build args
+        run: |
+          cd v8
+          mkdir -p out.gn/${PLATFORM}
+          [ "$BUILD_TYPE" = "debug" ] && \
+            export IS_DEBUG=true SYMBOL_LEVEL=2 || \
+            export IS_DEBUG=false SYMBOL_LEVEL=0
+          [ "$LIB_TYPE" = "shared" ] && \
+            export SHARED_LIB=true STATIC_LIB=false || \
+            export SHARED_LIB=false STATIC_LIB=true
+          perl -pe 's{\$(\{)?(\w+)(?(1)\})}{$ENV{$2} // $&}ge' \
+            "${GITHUB_WORKSPACE}/args.gn" > "out.gn/${PLATFORM}/args.gn"
+          cat out.gn/${PLATFORM}/args.gn
+      - name: Build library
+        continue-on-error: true
+        run: |
+          cd v8
+          gn gen out.gn/${PLATFORM}
+          gn args --list out.gn/${PLATFORM} > out.gn/${PLATFORM}/v8_build_args.txt
+          export BUILD_TARGETS=(v8 v8_base v8_libbase v8_libplatform icui18n icuuc)
+          [ "$LIB_TYPE" = "static" ] && BUILD_TARGETS+=(v8_monolith); export BUILD_TARGETS
+          ninja -j $(($(nproc)+2)) ${BUILD_TARGETS[@]} -C out.gn/${PLATFORM}
+      - name: Compress library
+        run: |
+          # tar -cf v8-${V8_VERSION}-lib-${PLATFORM}.tar \
+          #   --transform="s|^v8/out.gn/${PLATFORM}/|v8/|" v8/out.gn/${PLATFORM}/v8_build_*
+          # find v8/out.gn/${PLATFORM} -name "*.a" -o -name "*.so" | tar -rf v8-${V8_VERSION}-lib-${PLATFORM}.tar \
+          #   --transform="s|^v8/out.gn.*/|v8/lib/|" -T -
+          # pigz v8-${V8_VERSION}-lib-${PLATFORM}.tar
+          tar --use-compress-program=pigz -cf v8-${V8_VERSION}-lib-${PLATFORM}.tar.gz v8/out.gn/${PLATFORM}
+      - name: Upload library
+        uses: actions/upload-artifact@v4
+        with:
+          path: v8-${{ env.V8_VERSION }}-lib-${{ matrix.platform }}.tar.gz
+          name: v8-${{ env.V8_VERSION }}-lib-${{ matrix.platform }}.tar.gz
+
+  build-linux-arm64:
+    # if: ${{ false }}  # disable
+    name: linux-arm64
+    runs-on: ubuntu-22.04-arm
+    container:
+      image: debian:buster
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [
+          linux-arm64-static-release,
+          linux-arm64-static-debug,
+          linux-arm64-shared-release,
+          linux-arm64-shared-debug
+        ]
+    env:
+      PLATFORM: ${{ matrix.platform }}
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Platform env
+        run: |
+          uname -a
+          echo "OS=$(echo ${PLATFORM} | awk -F'[-_.]' '{print $1}')" >> $GITHUB_ENV
+          echo "ARCH=$(echo ${PLATFORM} | awk -F'[-_.]' '{print $2}')" >> $GITHUB_ENV
+          echo "LIB_TYPE=$(echo ${PLATFORM} | awk -F'[-_.]' '{print $3}')" >> $GITHUB_ENV
+          echo "BUILD_TYPE=$(echo ${PLATFORM} | awk -F'[-_.]' '{print $4}')" >> $GITHUB_ENV
+      - name: Install preliminary tools
+        run: |
+          apt-get update
+          apt-get install -y git curl python3 pigz pkg-config build-essential ninja-build
+          ln -s /usr/bin/python3 /usr/bin/python
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install depot_tools
+        run: |
+          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
+          echo "PATH=${GITHUB_WORKSPACE}/depot_tools:${PATH}" >> $GITHUB_ENV
+      - name: Patch depot_tools for python3.7 (in system)
+        run: |
+          sed -i 's/@functools\.lru_cache\b/@functools.lru_cache(maxsize=128)/g' depot_tools/gclient_paths.py
+      - name: Fetch v8 repository
+        run: |
+          gclient
+          fetch v8
+      - name: Sync v8 repository to target version
+        run: |
+          cd v8
+          git checkout tags/${V8_VERSION}
+          gclient sync -D
+      - name: Install gn for linux-arm64
+        run: |
+          cd v8
+          mv buildtools/linux64/gn buildtools/linux64/gn-linux-x64
+          curl -L https://chrome-infra-packages.appspot.com/dl/gn/gn/linux-arm64/+/latest -o gn-linux-arm64.zip
+          apt-get install -y unzip
+          unzip gn-linux-arm64.zip -d buildtools/linux64
+          sed -i 's/visibility = \[ ":.*" \]\([[:space:]]*#.*\)\?/visibility = [ ":*", "\/\/testing\/gmock:*" ]\1/' third_party/googletest/BUILD.gn
+      - name: Set build args
+        run: |
+          cd v8
+          mkdir -p out.gn/${PLATFORM}
+          [ "$BUILD_TYPE" = "debug" ] && \
+            export IS_DEBUG=true SYMBOL_LEVEL=2 || \
+            export IS_DEBUG=false SYMBOL_LEVEL=0
+          [ "$LIB_TYPE" = "shared" ] && \
+            export SHARED_LIB=true STATIC_LIB=false || \
+            export SHARED_LIB=false STATIC_LIB=true
+          perl -pe 's{\$(\{)?(\w+)(?(1)\})}{$ENV{$2} // $&}ge' \
+            "${GITHUB_WORKSPACE}/args.gn" > "out.gn/${PLATFORM}/args.gn"
+          cat out.gn/${PLATFORM}/args.gn
+      - name: Build library
+        continue-on-error: true
+        run: |
+          cd v8
+          gn gen out.gn/${PLATFORM}
+          gn args --list out.gn/${PLATFORM} > out.gn/${PLATFORM}/v8_build_args.txt
+          export BUILD_TARGETS=(v8 v8_base v8_libbase v8_libplatform icui18n icuuc)
+          [ "$LIB_TYPE" = "static" ] && BUILD_TARGETS+=(v8_monolith); export BUILD_TARGETS
+          ninja -j $(($(nproc)+2)) ${BUILD_TARGETS[@]} -C out.gn/${PLATFORM}
+      - name: Compress library
+        run: |
+          # tar -cf v8-${V8_VERSION}-lib-${PLATFORM}.tar \
+          #   --transform="s|^v8/out.gn/${PLATFORM}/|v8/|" v8/out.gn/${PLATFORM}/v8_build_*
+          # find v8/out.gn/${PLATFORM} -name "*.a" -o -name "*.so" | tar -rf v8-${V8_VERSION}-lib-${PLATFORM}.tar \
+          #   --transform="s|^v8/out.gn.*/|v8/lib/|" -T -
+          # pigz v8-${V8_VERSION}-lib-${PLATFORM}.tar
+          tar --use-compress-program=pigz -cf v8-${V8_VERSION}-lib-${PLATFORM}.tar.gz v8/out.gn/${PLATFORM}
+      - name: Upload library
+        uses: actions/upload-artifact@v4
+        with:
+          path: v8-${{ env.V8_VERSION }}-lib-${{ matrix.platform }}.tar.gz
+          name: v8-${{ env.V8_VERSION }}-lib-${{ matrix.platform }}.tar.gz

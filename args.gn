@@ -1,0 +1,12 @@
+target_os="${OS}"
+target_cpu="${ARCH}"
+v8_target_cpu="${ARCH}"
+is_clang=false
+use_custom_libcxx=false
+is_debug=${IS_DEBUG}
+symbol_level=${SYMBOL_LEVEL}
+treat_warnings_as_errors=false
+is_component_build=${SHARED_LIB}
+v8_static_library=${STATIC_LIB}
+v8_monolithic=${STATIC_LIB}
+v8_use_external_startup_data=false
