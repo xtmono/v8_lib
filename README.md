@@ -7,3 +7,4 @@ This repo contains release and debug builds of the javascript v8 libraries for t
 - Linux arm64 built on Debian 10 (Buster) with gcc
 - MacOS x64 built on MacOS 13 (Ventura) with apple clang
 - MacOS arm64 built on MacOS 14 (Sonoma) with apple clang
+- Windows x64 built on Windows Server 2019 with clang and Visual Studio 2019
