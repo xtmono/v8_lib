@@ -413,8 +413,12 @@ jobs:
           [ "${LIB_TYPE}" = "shared" ] && \
             { BUILD_TARGETS=${TARGETS_SHARED}; echo "BUILD_TARGETS=${BUILD_TARGETS}" >> $GITHUB_ENV; } || \
             { BUILD_TARGETS=${TARGETS_STATIC}; echo "BUILD_TARGETS=${BUILD_TARGETS}" >> $GITHUB_ENV; }
-      - name: Setup VisualStudio
+      - name: Setup VisualStudio 2019
         uses: microsoft/setup-msbuild@v2
+      # - name: Install Visual Studio 2019
+      #   run: |
+      #     choco install -y visualstudio2019buildtools --package-parameters \
+      #       "--add Microsoft.VisualStudio.Component.VC.Tools.x86.x64"
       - name: Setup Python3.9
         uses: actions/setup-python@v5
         with:
